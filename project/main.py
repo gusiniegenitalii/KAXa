@@ -900,7 +900,7 @@ if __name__ == '__main__':
     from pathlib import Path
 
     script_dir = Path(__file__).resolve().parent
-    app_icon_path = script_dir / "project" / "icons" / "app_icon.png"
+    app_icon_path = script_dir / "icons" / "app_icon.png"
     app_icon_path = str(app_icon_path) 
     app.setStyle("Windows") 
     os.path.exists(app_icon_path)
