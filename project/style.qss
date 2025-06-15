@@ -1,0 +1,260 @@
+/* =================================================================== */
+/* КЛАССИЧЕСКАЯ СВЕТЛАЯ ТЕМА                    */
+/* =================================================================== */
+
+/* Общие стили */
+QMainWindow, QWidget {
+    background-color: #F7F8FA; /* Очень светлый серый фон */
+    font-family: "Segoe UI", Arial, sans-serif;
+    color: #333333; /* Основной темный цвет текста */
+}
+
+/* Левая панель */
+#LeftPanel {
+    background-color: #FFFFFF;
+    border-right: 1px solid #EAEAEA;
+}
+#AppTitle {
+    color: #1A1A1A;
+    font-size: 18px;
+    font-weight: bold;
+    padding: 5px 0 5px 5px;
+}
+#SearchBar {
+    background-color: #F5F5F5;
+    border: 1px solid #EAEAEA;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 13px;
+}
+#SearchBar:focus {
+    border: 1px solid #0078D7;
+}
+#NavList {
+    border: none;
+    font-size: 14px;
+    outline: 0;
+    background-color: #FFFFFF;
+}
+#NavList::item {
+    padding: 10px;
+    border-radius: 6px;
+    min-height: 25px; 
+}
+#NavList::item:hover {
+    background-color: #F0F0F0;
+}
+#NavList::item:selected {
+    background-color: #E8F0FE;
+    color: #0063B1;
+    font-weight: bold;
+}
+#TagCount {
+    background-color: #EAEAEA;
+    color: #606060;
+    border-radius: 5px;
+    padding: 2px 6px;
+    font-size: 11px;
+    font-weight: bold;
+}
+
+/* --- NEW STYLE --- */
+#ReportButton {
+    background-color: #F5F5F5;
+    color: #333333;
+    border: 1px solid #E0E0E0;
+    border-radius: 8px;
+    padding: 10px;
+    font-size: 13px;
+    font-weight: bold;
+    text-align: center;
+}
+#ReportButton:hover {
+    background-color: #EAEAEA;
+    border-color: #D0D0D0;
+}
+/* --- END NEW STYLE --- */
+
+
+/* Центральная панель */
+#CenterPanel {
+    background-color: #FFFFFF;
+}
+#CenterTitle {
+    font-size: 24px;
+    font-weight: bold;
+    color: #1A1A1A;
+}
+#NewTaskButton {
+    background-color: #E8F0FE;
+    color: #0078D7;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 15px;
+    font-size: 13px;
+    font-weight: bold;
+}
+#NewTaskButton:hover {
+    background-color: #DDE8FC;
+}
+
+/* Стили задач */
+#ScrollArea {
+    border: none;
+    background-color: #FFFFFF;
+}
+#TaskWidget {
+    background-color: #FFFFFF;
+    border-bottom: 1px solid #F0F0F0;
+}
+#TaskWidget:hover {
+    background-color: #F8F9FA;
+}
+#TaskTitle {
+    font-size: 14px;
+    font-weight: 500;
+}
+#TaskMeta {
+    color: #888888;
+    font-size: 12px;
+}
+#StarButton {
+    border: none;
+    background-color: transparent;
+    color: #C0C0C0;
+    font-size: 20px;
+    padding-bottom: 4px;
+}
+#StarButton:checked {
+    color: #0078D7;
+}
+QCheckBox::indicator {
+    width: 18px;
+    height: 18px;
+}
+QCheckBox::indicator:unchecked {
+    border: 2px solid #CCCCCC;
+    border-radius: 9px;
+    background-color: #FFFFFF;
+}
+QCheckBox::indicator:unchecked:hover {
+    border: 2px solid #0078D7;
+}
+QCheckBox::indicator:checked {
+    background-color: #0078D7;
+    border: 2px solid #0078D7;
+    border-radius: 9px;
+    /* Для светлой темы лучше черная галочка, но белая тоже сойдет */
+    image: url(icons/check_white.svg);
+}
+#TaskWidget[completed="true"] {
+    opacity: 0.6;
+}
+#TaskWidget[completed="true"] #TaskTitle {
+    color: #888888;
+    text-decoration: line-through;
+}
+
+/* Правая панель */
+#RightPanel {
+    background-color: #FFFFFF;
+    border-left: 1px solid #EAEAEA;
+}
+#CompletedList {
+    border: none;
+    color: #888888;
+    text-decoration: line-through;
+    background-color: #FFFFFF;
+}
+#CompletedList::item {
+    padding: 5px 0px;
+}
+
+/* =================================================================== */
+/* НАДЕЖНЫЕ СТИЛИ КАЛЕНДАРЯ                       */
+/* =================================================================== */
+
+#CalendarWidget {
+    border: none;
+    background-color: #FFFFFF;
+}
+/* Сетка дат */
+#CalendarWidget QTableView {
+    background-color: #FFFFFF;
+    border: none;
+    selection-background-color: #0078D7;
+    selection-color: #FFFFFF;
+    gridline-color: #F0F0F0;
+}
+/* Дни недели (Пн, Вт...) */
+#CalendarWidget QHeaderView::section:horizontal {
+    background-color: #FFFFFF;
+    border-bottom: 1px solid #F0F0F0;
+    color: #606060;
+    padding: 4px;
+    font-weight: bold;
+}
+/* Навигация (Месяц, Год, стрелки) */
+#CalendarWidget #qt_calendar_navigationbar {
+    background-color: #FFFFFF;
+    border-bottom: 1px solid #F0F0F0;
+    padding: 4px;
+}
+#CalendarWidget QToolButton {
+    background-color: transparent;
+    border: none;
+    color: #333333;
+    font-size: 16px;
+    font-weight: bold;
+    padding: 0 5px;
+}
+#CalendarWidget QToolButton:hover {
+    background-color: #F0F0F0;
+    border-radius: 4px;
+}
+#CalendarWidget QSpinBox {
+    background-color: transparent;
+    border: none;
+    color: #333333;
+    font-size: 16px;
+    font-weight: bold;
+}
+#CalendarWidget QMenu {
+    background-color: #FFFFFF;
+    color: #333333;
+    border: 1px solid #CCCCCC;
+}
+#CalendarWidget QMenu::item:selected {
+    background-color: #E8F0FE;
+}
+/* Даты */
+#CalendarWidget #qt_calendar_today {
+    font-weight: bold;
+    color: #0078D7;
+}
+#CalendarWidget QTableView::item:disabled {
+    color: #CCCCCC;
+}
+
+/* Вспомогательные стили */
+QToolTip {
+    background-color: #333333;
+    color: white;
+    border: 1px solid #444444;
+    padding: 5px;
+    border-radius: 4px;
+}
+QScrollBar:vertical {
+    border: none;
+    background: #FAFAFA;
+    width: 8px;
+    margin: 0px 0px 0px 0px;
+}
+QScrollBar::handle:vertical {
+    background: #D0D0D0;
+    min-height: 20px;
+    border-radius: 4px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #B0B0B0;
+}

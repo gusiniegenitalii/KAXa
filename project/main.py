@@ -1,1216 +1,817 @@
+# main.py
+
 import sys
 import os
-import shutil
-import uuid
-import sqlite3
-
+import datetime
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget,
-    QLineEdit, QPushButton, QListWidget, QListWidgetItem, QComboBox,
-    QDateTimeEdit, QMessageBox, QDialog, QDialogButtonBox, QLabel,
-    QTextEdit, QCheckBox, QMenu, QTreeView, QSplitter, QTabWidget,
-    QInputDialog, QToolBar, QSizePolicy, QStyle, QCalendarWidget,
-    QToolButton
+    QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
+    QLineEdit, QPushButton, QListWidget, QListWidgetItem, QCalendarWidget,
+    QScrollArea, QCheckBox, QToolTip, QDialog, QFormLayout, QTextEdit,
+    QDateEdit, QDialogButtonBox, QMenu, QFrame, QMessageBox, QDateTimeEdit,
+    QFileDialog
 )
-
-from PyQt6.QtCore import (
-    Qt, QDateTime, QTimer, QDir, QFileInfo, QModelIndex, QVariant, QPoint, QSize,
-    QDate, QTime, QLocale, QRect
-)
-
 from PyQt6.QtGui import (
-    QFileSystemModel, QAction, QFont, QIcon, QColor, QTextCharFormat,
-    QPainter, QPalette, QTextOption, QFontMetrics
+    QIcon, QFont, QPalette, QColor, QPainter, QCursor
+)
+from PyQt6.QtCore import (
+    Qt, QSize, pyqtSignal, QDate, QPropertyAnimation, QEasingCurve, QDateTime,
+    QParallelAnimationGroup, QAbstractAnimation, QPoint, QTimer
 )
 
-PRIORITIES = {
-    1: {"name": "Высокий", "color": QColor("red")},
-    2: {"name": "Средний", "color": QColor("orange")},
-    3: {"name": "Низкий", "color": QColor("green")},
-    4: {"name": "Нет", "color": QColor("gray")}
-}
+from database import DatabaseManager
 
-DATABASE_NAME = './project/todo.db'
-DEFAULT_VAULT_NAME = "notes"
+# --- Зависимость для экспорта в Excel ---
+try:
+    import openpyxl # type: ignore
+    from openpyxl.styles import Font, Alignment # type: ignore
+    from openpyxl.utils import get_column_letter # type: ignore
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
 
-APP_NAME_NOTES = "KAXa Заметки"
-APP_NAME_CALENDAR = "KAXa Календарь"
-COMBINED_APP_NAME = "KAXa"
+# --- Вспомогательные функции ---
 
+def clear_layout(layout):
+    """Рекурсивно очищает layout от всех виджетов."""
+    if layout is not None:
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+            else:
+                clear_layout(item.layout())
 
-ABOUT_INFO = {
-    "program_name": COMBINED_APP_NAME,
-    "version": "0.3a",
-    "authors": "eggs",
-    "copyright": "© 2025 egg's Team. Все права защищены.",
-    "description": (
-        "KAXa - это комплексное приложение, разработанное в рамках курсового проекта. "
-        "Оно объединяет в себе функционал для ведения заметок и управления задачами через календарь."
-    )
-}
+def load_icon(icon_path):
+    """Безопасно загружает иконку по пути."""
+    if os.path.exists(icon_path):
+        return QIcon(icon_path)
+    print(f"Внимание: Иконка не найдена по пути {icon_path}")
+    return QIcon()
 
-### КЛАСС: Task - Описывает элемент списка дел.
-class Task:
-    ### --- Метод: __init__ --- Инициализирует новую задачу.
-    def __init__(self, text, priority=4, reminder_dt=None, completed=False, id_str=None, reminder_shown=False):
-        self.id = id_str if id_str else str(uuid.uuid4())
-        self.text = text
-        self.priority = int(priority)
-        self.reminder_datetime = reminder_dt
-        self.completed = bool(completed)
-        self.reminder_shown = bool(reminder_shown)
+def colorize_icon(icon: QIcon, color: QColor) -> QIcon:
+    """Перекрашивает иконку в заданный цвет (для соответствия теме)."""
+    if icon.isNull():
+        return icon
+    pixmap = icon.pixmap(QSize(16, 16))
+    painter = QPainter(pixmap)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    painter.fillRect(pixmap.rect(), color)
+    painter.end()
+    return QIcon(pixmap)
 
-    ### --- Метод: __repr__ --- Возвращает строковое представление задачи.
-    def __repr__(self):
-        return (f"Task(id={self.id}, text='{self.text[:20]}...', priority={self.priority}, "
-                f"reminder={self.reminder_datetime}, completed={self.completed}, "
-                f"reminder_shown={self.reminder_shown})")
+# --- Классы виджетов ---
 
-### КЛАСС: EditTaskDialog - Диалоговое окно для создания или редактирования задачи.
-class EditTaskDialog(QDialog):
-    ### --- Метод: __init__ --- Инициализирует диалоговое окно.
-    def __init__(self, task=None, parent=None, default_date=None):
+class ClickableLabel(QLabel):
+    """Метка, которая реагирует на клики."""
+    clicked = pyqtSignal()
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+    def mousePressEvent(self, event):
+        self.clicked.emit()
+        super().mousePressEvent(event)
+
+class AboutDialog(QDialog):
+    """Диалоговое окно "О приложении"."""
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Редактировать задачу" if task else "Новая задача")
-        self.task = task
-        self._setup_ui(default_date)
-
-    ### --- Метод: _setup_ui --- Создает элементы интерфейса для диалога.
-    def _setup_ui(self, default_date):
+        self.setWindowTitle("О приложении")
+        self.setFixedSize(350, 200)
         layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        title_label = QLabel("Zettelkasten")
+        title_label.setFont(QFont("Inter", 22, QFont.Weight.Bold))
+        title_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        version_label = QLabel("Версия 0.1a")
+        version_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
 
-        self.text_edit = QTextEdit()
-        if self.task:
-            self.text_edit.setText(self.task.text)
-        layout.addWidget(QLabel("Описание задачи:"))
-        layout.addWidget(self.text_edit)
+        help_text = """
+        <p><b>Zettelkasten</b> — это ваш персональный менеджер задач, 
+        созданный для того, чтобы помочь вам организовать свои дела 
+        и ничего не забыть.</p>
+        
+        <p><b>Добавление задач:</b> Нажмите кнопку <i>"+ Новая задача"</i> вверху,
+        чтобы создать новую запись. Вы можете сразу добавить ее в "Важное" или "Личное".</p>
+        
+        <p><b>Редактирование:</b> <b>Дважды кликните</b> по любой задаче, 
+        чтобы изменить ее название, добавить детали, теги, срок выполнения или 
+        настроить напоминания.</p>
+        
+        <p><b>Завершение:</b> Поставьте <b>галочку</b> слева от задачи, 
+        чтобы отметить ее как выполненную.</p>
+        
+        <p><b>Важность:</b> Нажмите на <b>звездочку (☆)</b>, чтобы сделать задачу важной.</p>
+        
+        <p><b>Навигация:</b> Используйте меню слева для быстрой фильтрации задач.</p>
+        
+        <p><b>Календарь:</b> Кликните на любую дату в календаре справа, 
+        чтобы увидеть все задачи с этим сроком выполнения.</p>
+        
+        <p><b>Отчеты:</b> Нажмите кнопку <i>"Выгрузить отчет"</i>, чтобы сохранить 
+        список задач за выбранный период.</p>
+        """
+        help_label = QLabel(help_text)
+        help_label.setWordWrap(True) 
 
-        self.priority_combo = QComboBox()
-        for p_val, p_data in sorted(PRIORITIES.items()):
-            self.priority_combo.addItem(p_data["name"], p_val)
-        if self.task:
-            self.priority_combo.setCurrentIndex(self.priority_combo.findData(self.task.priority))
-        else:
-            self.priority_combo.setCurrentIndex(self.priority_combo.findData(4))
-        layout.addWidget(QLabel("Приоритет:"))
-        layout.addWidget(self.priority_combo)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        buttons.accepted.connect(self.accept)
 
-        self.reminder_checkbox = QCheckBox("Установить дату/время (и напоминание)")
-        layout.addWidget(self.reminder_checkbox)
+        layout.addWidget(title_label)
+        layout.addWidget(version_label)
+        layout.addWidget(separator)
+        layout.addWidget(help_label) # Просто добавляем label в layout
+        layout.addStretch() # Добавляем растягивающееся пространство, чтобы кнопки были внизу
+        layout.addWidget(buttons)
 
-        self.reminder_datetime_edit = QDateTimeEdit()
+class AddTaskDialog(QDialog):
+    """Диалог для добавления новой задачи."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Добавить новую задачу")
+        self.setMinimumWidth(400)
+        self.layout = QVBoxLayout(self)
+        form_layout = QFormLayout()
+        self.title_edit = QLineEdit()
+        self.details_edit = QTextEdit()
+        self.details_edit.setAcceptRichText(False)
+        self.tags_edit = QLineEdit()
+        self.tags_edit.setPlaceholderText("Например: Работа, Личное, Дом")
+        self.due_date_edit = QDateEdit(self)
+        self.due_date_edit.setCalendarPopup(True)
+        self.due_date_edit.setDate(QDate.currentDate())
+        self.important_check = QCheckBox("Отметить как важное")
+        form_layout.addRow("Название:", self.title_edit)
+        form_layout.addRow("Детали:", self.details_edit)
+        form_layout.addRow("Теги (через запятую):", self.tags_edit)
+        form_layout.addRow("Срок выполнения:", self.due_date_edit)
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        self.layout.addLayout(form_layout)
+        self.layout.addWidget(self.important_check)
+        self.layout.addWidget(button_box)
+
+    def get_task_data(self):
+        """Собирает данные из полей формы в словарь."""
+        return {"title": self.title_edit.text().strip(),
+                "details": self.details_edit.toPlainText().strip(),
+                "tags": self.tags_edit.text().strip(),
+                "due_date": self.due_date_edit.date().toPyDate().isoformat(),
+                "is_important": self.important_check.isChecked()}
+
+class EditTaskDialog(QDialog):
+    """Диалог для редактирования существующей задачи и ее напоминаний."""
+    def __init__(self, task_data, reminders, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Редактировать задачу")
+        self.setMinimumWidth(450)
+        self.layout = QVBoxLayout(self)
+        form_layout = QFormLayout()
+        self.title_edit = QLineEdit()
+        self.details_edit = QTextEdit()
+        self.details_edit.setAcceptRichText(False)
+        self.tags_edit = QLineEdit()
+        self.due_date_edit = QDateEdit(self)
+        self.due_date_edit.setCalendarPopup(True)
+        self.important_check = QCheckBox("Отметить как важное")
+        form_layout.addRow("Название:", self.title_edit)
+        form_layout.addRow("Детали:", self.details_edit)
+        form_layout.addRow("Теги (через запятую):", self.tags_edit)
+        form_layout.addRow("Срок выполнения:", self.due_date_edit)
+        self.layout.addLayout(form_layout)
+        self.layout.addWidget(self.important_check)
+
+        # Разделитель
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        self.layout.addWidget(separator)
+
+        # Секция напоминаний
+        self.layout.addWidget(QLabel("<b>Напоминания</b>"))
+        self.reminders_list = QListWidget()
+        self.reminders_list.setToolTip("Двойной клик для удаления напоминания.")
+        self.reminders_list.itemDoubleClicked.connect(self.remove_selected_reminder)
+        self.layout.addWidget(self.reminders_list)
+        
+        # Контролы для добавления напоминаний
+        reminder_controls_layout = QHBoxLayout()
+        self.reminder_datetime_edit = QDateTimeEdit(self)
         self.reminder_datetime_edit.setCalendarPopup(True)
         self.reminder_datetime_edit.setDateTime(QDateTime.currentDateTime().addSecs(3600))
         self.reminder_datetime_edit.setDisplayFormat("dd.MM.yyyy HH:mm")
-        self.reminder_datetime_edit.setEnabled(False)
+        add_reminder_btn = QPushButton("Добавить")
+        add_reminder_btn.clicked.connect(self.add_reminder_to_list)
+        reminder_controls_layout.addWidget(self.reminder_datetime_edit, 1)
+        reminder_controls_layout.addWidget(add_reminder_btn)
+        self.layout.addLayout(reminder_controls_layout)
 
-        if self.task and self.task.reminder_datetime and self.task.reminder_datetime.isValid():
-            self.reminder_datetime_edit.setDateTime(self.task.reminder_datetime)
-            self.reminder_checkbox.setChecked(True)
-            self.reminder_datetime_edit.setEnabled(True)
-        elif default_date:
-            self.reminder_datetime_edit.setDateTime(QDateTime(default_date, QTime(9,0)))
-            self.reminder_checkbox.setChecked(True)
-            self.reminder_datetime_edit.setEnabled(True)
+        # Кнопки OK/Cancel
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        self.layout.addWidget(button_box)
+        self.populate_data(task_data, reminders)
 
-        self.reminder_checkbox.stateChanged.connect(
-            lambda state: self.reminder_datetime_edit.setEnabled(state == Qt.CheckState.Checked.value)
-        )
-        layout.addWidget(QLabel("Дата и время задачи:"))
-        layout.addWidget(self.reminder_datetime_edit)
+    def populate_data(self, task_data, reminders):
+        """Заполняет поля формы данными существующей задачи."""
+        self.title_edit.setText(task_data.get('title', ''))
+        self.details_edit.setText(task_data.get('details', ''))
+        self.tags_edit.setText(task_data.get('tags', ''))
+        if due_date_str := task_data.get('due_date'):
+            self.due_date_edit.setDate(QDate.fromString(due_date_str, "yyyy-MM-dd"))
+        self.important_check.setChecked(bool(task_data.get('is_important', 0)))
+        
+        for reminder in reminders:
+            dt = QDateTime.fromString(reminder['reminder_datetime'], Qt.DateFormat.ISODate)
+            item = QListWidgetItem(dt.toString("dd MMMM yy 'в' HH:mm"))
+            item.setData(Qt.ItemDataRole.UserRole, reminder['reminder_datetime'])
+            self.reminders_list.addItem(item)
 
-        self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        self.button_box.accepted.connect(self.accept)
-        self.button_box.rejected.connect(self.reject)
-        layout.addWidget(self.button_box)
+    def add_reminder_to_list(self):
+        """Добавляет новое напоминание в список (без дубликатов)."""
+        dt = self.reminder_datetime_edit.dateTime()
+        iso_string = dt.toString(Qt.DateFormat.ISODate)
+        
+        for i in range(self.reminders_list.count()):
+            if self.reminders_list.item(i).data(Qt.ItemDataRole.UserRole) == iso_string:
+                return  # Не добавлять, если уже существует
+                
+        item = QListWidgetItem(dt.toString("dd MMMM yy 'в' HH:mm"))
+        item.setData(Qt.ItemDataRole.UserRole, iso_string)
+        self.reminders_list.addItem(item)
+        self.reminders_list.sortItems()
 
-    ### --- Метод: get_task_data --- Извлекает и проверяет данные задачи из диалога.
+    def remove_selected_reminder(self, item):
+        """Удаляет выбранное напоминание из списка."""
+        self.reminders_list.takeItem(self.reminders_list.row(item))
+
     def get_task_data(self):
-        text = self.text_edit.toPlainText().strip()
-        priority = self.priority_combo.currentData()
-        reminder_dt = None
-        reminder_active = self.reminder_checkbox.isChecked()
+        """Собирает данные о задаче из полей формы."""
+        return {"title": self.title_edit.text().strip(),
+                "details": self.details_edit.toPlainText().strip(),
+                "tags": self.tags_edit.text().strip(),
+                "due_date": self.due_date_edit.date().toPyDate().isoformat(),
+                "is_important": self.important_check.isChecked()}
 
-        if not text:
-            QMessageBox.warning(self, "Ошибка", "Описание задачи не может быть пустым.")
-            return None
+    def get_reminders_data(self):
+        """Собирает список всех напоминаний из виджета."""
+        return [self.reminders_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.reminders_list.count())]
 
-        if reminder_active:
-            reminder_dt = self.reminder_datetime_edit.dateTime()
-            is_new_task_or_reminder_changed = not self.task or \
-                                             (self.task and self.task.reminder_datetime != reminder_dt)
-
-            if is_new_task_or_reminder_changed and reminder_dt <= QDateTime.currentDateTime():
-                reply = QMessageBox.warning(self, "Внимание",
-                                            "Выбранное время задачи находится в прошлом. "
-                                            "Напоминание для этого времени не сработает. Продолжить?",
-                                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                            QMessageBox.StandardButton.No)
-                if reply == QMessageBox.StandardButton.No:
-                    return None
-        return text, priority, reminder_dt
-
-### КЛАСС: SimpleTreeModel - Пользовательская модель файловой системы для дерева заметок.
-class SimpleTreeModel(QFileSystemModel):
-    ### --- Метод: __init__ --- Инициализирует модель.
+class ReportDialog(QDialog):
+    """Диалог для выбора диапазона дат для отчета."""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._folder_font = QFont()
-        self._folder_font.setBold(True)
+        self.setWindowTitle("Выгрузить отчет по задачам")
+        self.setMinimumWidth(350)
+        self.layout = QVBoxLayout(self)
+        form_layout = QFormLayout()
+        self.start_date_edit = QDateEdit(self, calendarPopup=True, date=QDate.currentDate().addDays(-7))
+        self.end_date_edit = QDateEdit(self, calendarPopup=True, date=QDate.currentDate())
+        form_layout.addRow("Начальная дата:", self.start_date_edit)
+        form_layout.addRow("Конечная дата:", self.end_date_edit)
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        self.layout.addLayout(form_layout)
+        self.layout.addWidget(button_box)
 
-    ### --- Метод: data --- Предоставляет данные для отображения в дереве.
-    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid(): return QVariant()
-        file_info = self.fileInfo(index)
+    def get_date_range(self):
+        """Возвращает выбранный диапазон дат."""
+        return {"start_date": self.start_date_edit.date().toPyDate().isoformat(), 
+                "end_date": self.end_date_edit.date().toPyDate().isoformat()}
 
-        if role == Qt.ItemDataRole.FontRole:
-            return self._folder_font if file_info.isDir() else QVariant()
-        elif role == Qt.ItemDataRole.DecorationRole:
-             return QVariant()
-        elif role == Qt.ItemDataRole.DisplayRole:
-            if file_info.isFile() and file_info.suffix().lower() == 'md':
-                return file_info.baseName()
-        return super().data(index, role)
+class TaskWidget(QWidget):
+    """Виджет для отображения одной задачи в списке."""
+    status_changed = pyqtSignal(int, bool)
+    importance_changed = pyqtSignal(int, bool)
+    edit_requested = pyqtSignal(int)
+    
+    def __init__(self, task_data):
+        super().__init__()
+        self.task_id = task_data['id']
+        self.setObjectName("TaskWidget")
+        # Начальные значения для анимации появления
+        self.setWindowOpacity(0.0)
+        self.setMaximumHeight(0)
 
-
-### КЛАСС: NoteWidget - Управляет функциональностью заметок.
-class NoteWidget(QWidget):
-    ### --- Метод: __init__ --- Инициализирует виджет заметок.
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.current_vault_path = None
-        self.current_file_path = None
-        self.unsaved_changes = False
-        self._initialize_paths()
-        self._setup_ui()
-        self._post_setup_ui_logic()
-
-    ### --- Метод: _initialize_paths --- Настраивает пути для хранения заметок.
-    def _initialize_paths(self):
-        try:
-            script_dir = os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__))
-        except NameError:
-            script_dir = os.getcwd()
-
-        project_notes_dir = os.path.join(script_dir, "notes")
-        if not os.path.exists(project_notes_dir):
-            try:
-                os.makedirs(project_notes_dir)
-            except OSError as e:
-                 QMessageBox.critical(self, "Ошибка", f"Не удалось создать директорию заметок: {e}")
-
-        self.current_vault_path = os.path.join(project_notes_dir, DEFAULT_VAULT_NAME)
-        if not os.path.exists(self.current_vault_path):
-            try:
-                os.makedirs(self.current_vault_path)
-            except OSError as e:
-                QMessageBox.critical(self, "Ошибка", f"Не удалось создать хранилище заметок '{DEFAULT_VAULT_NAME}': {e}")
-                self.current_vault_path = None
-
-    ### --- Метод: _setup_ui --- Создает элементы интерфейса для вкладки "Заметки".
-    def _setup_ui(self):
-        main_layout = QVBoxLayout(self)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-
-        left_panel_widget = QWidget()
-        lp_layout = QVBoxLayout(left_panel_widget)
-        lp_layout.setContentsMargins(0,0,0,0)
-
-        self.create_folder_button = QPushButton("Создать папку")
-        self.create_folder_button.clicked.connect(self.create_folder)
-        self.create_note_button = QPushButton("Создать заметку")
-        self.create_note_button.clicked.connect(self.new_note)
-        lp_layout.addWidget(self.create_folder_button)
-        lp_layout.addWidget(self.create_note_button)
-
-        self.file_tree = QTreeView()
-        self.file_tree.setAnimated(True)
-        self.file_tree.setIndentation(15)
-        self.file_model = SimpleTreeModel()
-
-        self.file_model.setFilter(QDir.Filter.NoDotAndDotDot | QDir.Filter.AllDirs | QDir.Filter.Files)
-        self.file_model.setNameFilters(["*.md"])
-        self.file_model.setNameFilterDisables(False)
-        self.file_tree.setModel(self.file_model)
-        for i in range(1, self.file_model.columnCount()): self.file_tree.setColumnHidden(i, True)
-        self.file_tree.setHeaderHidden(True)
-        self.file_tree.clicked.connect(self.on_file_tree_clicked)
-        self.file_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.file_tree.customContextMenuRequested.connect(self._show_tree_context_menu)
-        lp_layout.addWidget(self.file_tree)
-        splitter.addWidget(left_panel_widget)
-
-        self.editor = QTextEdit()
-        self.editor.setAcceptRichText(False)
-        self.editor.textChanged.connect(self._mark_unsaved_changes)
-        splitter.addWidget(self.editor)
-        splitter.setSizes([220, 730])
-        main_layout.addWidget(splitter, 1)
-
-        bottom_buttons_layout = QHBoxLayout()
-        bottom_buttons_layout.addStretch(1)
-        self.cancel_button = QPushButton("Отменить")
-        self.cancel_button.clicked.connect(self.revert_changes)
-        self.save_button = QPushButton("Сохранить")
-        self.save_button.clicked.connect(self.save_note)
-        bottom_buttons_layout.addWidget(self.cancel_button)
-        bottom_buttons_layout.addWidget(self.save_button)
-        main_layout.addLayout(bottom_buttons_layout)
-
-    ### --- Метод: _post_setup_ui_logic --- Завершающая настройка UI после создания элементов.
-    def _post_setup_ui_logic(self):
-        if self.current_vault_path:
-            root_idx = self.file_model.setRootPath(self.current_vault_path)
-            self.file_tree.setRootIndex(root_idx)
-            if root_idx.isValid(): self.file_tree.expand(root_idx)
-            self.create_note_button.setEnabled(True)
-            self.create_folder_button.setEnabled(True)
-            self.editor.setPlaceholderText("Создайте или выберите заметку.")
-        else:
-            self.editor.setPlaceholderText("Хранилище заметок не инициализировано.")
-            self.create_note_button.setEnabled(False)
-            self.create_folder_button.setEnabled(False)
-        self._update_ui_states()
-
-    ### --- Метод: _update_ui_states --- Обновляет состояние элементов UI (кнопки, плейсхолдеры).
-    def _update_ui_states(self):
-        can_act_on_current_file = bool(self.current_file_path and self.unsaved_changes)
-        self.save_button.setEnabled(can_act_on_current_file)
-        self.cancel_button.setEnabled(can_act_on_current_file)
-        if not self.current_file_path:
-             self.editor.setPlaceholderText("Создайте или выберите заметку." if self.current_vault_path else "Хранилище заметок не инициализировано.")
-
-    ### --- Метод: _mark_unsaved_changes --- Помечает несохраненные изменения в редакторе.
-    def _mark_unsaved_changes(self):
-        if self.current_file_path:
-            self.unsaved_changes = True
-        self._update_ui_states()
-        if self.parentWidget() and hasattr(self.parentWidget().parentWidget(), "update_window_title"):
-            self.parentWidget().parentWidget().update_window_title()
-
-    ### --- Метод: _get_base_create_path --- Определяет базовый путь для создания новых заметок/папок.
-    def _get_base_create_path(self):
-        idx = self.file_tree.currentIndex()
-        if idx.isValid():
-            path = self.file_model.filePath(idx)
-            return path if self.file_model.isDir(idx) else os.path.dirname(path)
-        return self.current_vault_path
-
-    ### --- Метод: _clean_name_for_path --- Очищает имена для путей файлов/папок.
-    def _clean_name_for_path(self, name: str, is_file: bool = False) -> str:
-        invalid_chars = '<>:"/\\|?*'
-        cleaned_name = "".join(c for c in name if c not in invalid_chars).strip()
-        cleaned_name = ' '.join(cleaned_name.split())
-        if is_file and not cleaned_name: return "Новая заметка"
-        elif not is_file and not cleaned_name: return "Новая папка"
-        return cleaned_name
-
-    ### --- Метод: create_folder --- Обрабатывает создание новой папки.
-    def create_folder(self):
-        if not self.current_vault_path:
-            QMessageBox.information(self, "Инфо", "Хранилище заметок не доступно."); return
-        name, ok = QInputDialog.getText(self, "Создать папку", "Имя папки:")
-        if ok and name:
-            cleaned_name = self._clean_name_for_path(name, is_file=False)
-            if not cleaned_name:
-                QMessageBox.warning(self, "Ошибка", "Некорректное имя папки."); return
-            path = os.path.join(self._get_base_create_path(), cleaned_name)
-            if os.path.exists(path):
-                QMessageBox.warning(self, "Ошибка", f"Папка '{cleaned_name}' уже существует."); return
-            try:
-                os.makedirs(path)
-            except Exception as e:
-                QMessageBox.critical(self, "Ошибка", f"Не удалось создать папку: {e}")
-        elif ok and not name.strip():
-            QMessageBox.warning(self, "Ошибка", "Имя папки не может быть пустым.")
-
-    ### --- Метод: on_file_tree_clicked --- Обрабатывает клики по дереву файлов.
-    def on_file_tree_clicked(self, index: QModelIndex):
-        if not index.isValid() or self.file_model.isDir(index): return
-        path = self.file_model.filePath(index)
-        if not (self.file_model.fileInfo(index).isFile() and path.lower().endswith(".md")): return
-        if path == self.current_file_path: return
-        if self.unsaved_changes and not self._confirm_discard("Переход к другой заметке?"):
-            if self.current_file_path:
-                prev_idx = self.file_model.index(self.current_file_path)
-                if prev_idx.isValid(): self.file_tree.setCurrentIndex(prev_idx)
-            return
-        self.load_note(path)
-
-    ### --- Метод: load_note --- Загружает содержимое заметки в редактор.
-    def load_note(self, file_path: str, is_revert: bool = False):
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f: content = f.read()
-            self.editor.blockSignals(True)
-            self.editor.setPlainText(content)
-            self.editor.blockSignals(False)
-            self.current_file_path = file_path
-            if not is_revert:
-                self.unsaved_changes = False
-            self._update_ui_states()
-            if self.parentWidget() and hasattr(self.parentWidget().parentWidget(), "update_window_title"):
-                 self.parentWidget().parentWidget().update_window_title()
-        except Exception as e:
-            QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить заметку: {e}")
-            self.current_file_path = None
-            self.editor.clear()
-            self.unsaved_changes = False
-            self._update_ui_states()
-            if self.parentWidget() and hasattr(self.parentWidget().parentWidget(), "update_window_title"):
-                 self.parentWidget().parentWidget().update_window_title()
-
-    ### --- Метод: save_note --- Сохраняет текущую заметку в файл.
-    def save_note(self):
-        if not self.current_file_path: return
-        try:
-            with open(self.current_file_path, 'w', encoding='utf-8') as f:
-                f.write(self.editor.toPlainText())
-            self.unsaved_changes = False
-            self._update_ui_states()
-            if self.parentWidget() and hasattr(self.parentWidget().parentWidget(), "update_window_title"):
-                 self.parentWidget().parentWidget().update_window_title()
-        except Exception as e:
-            QMessageBox.warning(self, "Ошибка", f"Не удалось сохранить заметку: {e}")
-
-    ### --- Метод: new_note --- Обрабатывает создание новой заметки.
-    def new_note(self):
-        if not self.current_vault_path:
-            QMessageBox.information(self, "Инфо", "Хранилище заметок не доступно."); return
-        if self.unsaved_changes and not self._confirm_discard("Создание новой заметки?"): return
-        name, ok = QInputDialog.getText(self, "Создать заметку", "Имя заметки:")
-        if ok and name:
-            cleaned_name = self._clean_name_for_path(name, is_file=True)
-            if not cleaned_name:
-                QMessageBox.warning(self, "Ошибка", "Некорректное имя заметки."); return
-            path = os.path.join(self._get_base_create_path(), f"{cleaned_name}.md")
-            if os.path.exists(path):
-                QMessageBox.warning(self, "Ошибка", f"Заметка '{cleaned_name}.md' уже существует."); return
-            try:
-                with open(path, 'w', encoding='utf-8') as f: f.write("")
-                self.load_note(path)
-                self.editor.setPlaceholderText("Я ваше полотно для ваших мыслей!")
-                new_idx = self.file_model.index(path)
-                if new_idx.isValid():
-                    self.file_tree.setCurrentIndex(new_idx)
-                    parent_idx = self.file_model.parent(new_idx)
-                    if parent_idx.isValid() and parent_idx != self.file_tree.rootIndex():
-                        self.file_tree.expand(parent_idx)
-                    self.file_tree.scrollTo(new_idx)
-            except Exception as e:
-                QMessageBox.warning(self, "Ошибка", f"Не удалось создать заметку: {e}")
-        elif ok and not name.strip():
-            QMessageBox.warning(self, "Ошибка", "Имя заметки не может быть пустым.")
-
-    ### --- Метод: revert_changes --- Отменяет несохраненные изменения в заметке.
-    def revert_changes(self):
-        if self.current_file_path and self.unsaved_changes:
-            if QMessageBox.question(self,"Отменить","Отменить несохраненные изменения в текущей заметке?",
-                                     QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,
-                                     QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
-                self.load_note(self.current_file_path, is_revert=True)
-                self.unsaved_changes = False
-                self._update_ui_states()
-                if self.parentWidget() and hasattr(self.parentWidget().parentWidget(), "update_window_title"):
-                     self.parentWidget().parentWidget().update_window_title()
-
-    ### --- Метод: _confirm_discard --- Запрашивает у пользователя подтверждение отмены несохраненных изменений.
-    def _confirm_discard(self, action_text: str = "Действие") -> bool:
-        if not self.unsaved_changes: return True
-        return QMessageBox.question(self, "Несохраненные изменения",
-                                   f"{action_text}\nЭто приведет к потере несохраненных изменений.\nПродолжить?",
-                                   QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,
-                                   QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
-
-    ### --- Метод: _show_tree_context_menu --- Отображает контекстное меню для элементов дерева файлов.
-    def _show_tree_context_menu(self, position: QPoint):
-        idx = self.file_tree.indexAt(position)
-        if not idx.isValid(): return
-        path = self.file_model.filePath(idx)
-        if not path or path == self.current_vault_path: return
-        menu = QMenu(self)
-        rename_action = QAction("Переименовать", self)
-        rename_action.triggered.connect(lambda: self._rename_item_at_index(idx))
-        menu.addAction(rename_action)
-        delete_action = QAction("Удалить", self)
-        delete_action.triggered.connect(lambda: self._delete_item_at_index(idx))
-        menu.addAction(delete_action)
-        menu.exec(self.file_tree.viewport().mapToGlobal(position))
-
-    ### --- Метод: _rename_item_at_index --- Переименовывает файл или папку.
-    def _rename_item_at_index(self, index: QModelIndex):
-        if not index.isValid(): return
-        old_path = self.file_model.filePath(index)
-        file_info = self.file_model.fileInfo(index)
-        is_dir = file_info.isDir()
-        old_display_name = file_info.baseName() if file_info.isFile() and file_info.suffix().lower() == 'md' else file_info.fileName()
-        item_type_str = "папки" if is_dir else "заметки"
-        new_name, ok = QInputDialog.getText(self, f"Переименовать {item_type_str}",
-                                            f"Новое имя для '{old_display_name}':", text=old_display_name)
-        if not ok: return
-        if not new_name.strip():
-            QMessageBox.warning(self, "Ошибка", f"Имя {item_type_str} не может быть пустым."); return
-        cleaned_new_name = self._clean_name_for_path(new_name, is_file=not is_dir)
-        if not cleaned_new_name:
-            QMessageBox.warning(self, "Ошибка", f"Некорректное новое имя для {item_type_str}."); return
-        final_new_name_for_path = cleaned_new_name
-        if not is_dir and not final_new_name_for_path.lower().endswith(".md"):
-            final_new_name_for_path += ".md"
-        parent_dir = os.path.dirname(old_path)
-        new_path = os.path.join(parent_dir, final_new_name_for_path)
-        if old_path.lower() == new_path.lower(): return
-        if os.path.exists(new_path):
-            QMessageBox.warning(self, "Ошибка", f"Имя '{final_new_name_for_path}' уже существует в этой папке."); return
-        active_note_affected = False
-        if self.current_file_path:
-            if not is_dir and old_path == self.current_file_path:
-                active_note_affected = True
-            elif is_dir and self.current_file_path.startswith(old_path + os.sep):
-                active_note_affected = True
-        if active_note_affected and self.unsaved_changes:
-            if not self._confirm_discard(f"Переименование '{old_display_name}' (открытая заметка будет затронута)"):
-                return
-        try:
-            os.rename(old_path, new_path)
-            if active_note_affected:
-                if not is_dir:
-                    self.current_file_path = new_path
-                else:
-                    relative_path = os.path.relpath(self.current_file_path, old_path)
-                    self.current_file_path = os.path.join(new_path, relative_path)
-                self.unsaved_changes = False
-            self._update_ui_states()
-            if self.parentWidget() and hasattr(self.parentWidget().parentWidget(), "update_window_title"):
-                 self.parentWidget().parentWidget().update_window_title()
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось переименовать: {e}")
-
-    ### --- Метод: _delete_item_at_index --- Удаляет файл или папку.
-    def _delete_item_at_index(self, index: QModelIndex):
-        if not index.isValid(): return
-        path = self.file_model.filePath(index)
-        file_info = self.file_model.fileInfo(index)
-        is_dir = file_info.isDir()
-        display_name = file_info.baseName() if file_info.isFile() and file_info.suffix().lower() == 'md' else file_info.fileName()
-        item_type_str = "папку" if is_dir else "заметку"
-        content_str = " и всё её содержимое" if is_dir else ""
-        msg = f"Вы уверены, что хотите удалить {item_type_str} '{display_name}'{content_str}?"
-        active_note_affected_and_unsaved = False
-        if self.current_file_path and self.unsaved_changes:
-            if (not is_dir and path == self.current_file_path) or \
-               (is_dir and self.current_file_path.startswith(path + os.sep)):
-                active_note_affected_and_unsaved = True
-                msg += f"\n\nВНИМАНИЕ: Открытая заметка '{QFileInfo(self.current_file_path).baseName()}' имеет несохраненные изменения, которые будут потеряны."
-        if QMessageBox.question(self,"Подтверждение удаления", msg,
-                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                 QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
-            try:
-                if is_dir: shutil.rmtree(path)
-                else: os.remove(path)
-                if (self.current_file_path and path == self.current_file_path) or \
-                   (is_dir and self.current_file_path and self.current_file_path.startswith(path + os.sep)):
-                    self.editor.blockSignals(True); self.editor.clear(); self.editor.blockSignals(False)
-                    self.current_file_path = None
-                    self.unsaved_changes = False
-                    self.editor.setPlaceholderText("Создайте или выберите заметку.")
-                    if self.parentWidget() and hasattr(self.parentWidget().parentWidget(), "update_window_title"):
-                        self.parentWidget().parentWidget().update_window_title()
-            except Exception as e:
-                QMessageBox.critical(self, "Ошибка", f"Не удалось удалить: {e}")
-            finally:
-                self._update_ui_states()
-
-### КЛАСС: CustomCalendarWidget - Календарь с отображением количества задач.
-class CustomCalendarWidget(QCalendarWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._task_counts_for_month = {}  # Словарь {QDate: int} для хранения количества задач
-        self._task_count_font = QFont()
+        # --- Создание layout и виджетов ---
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 5, 10, 5)
+        layout.setSpacing(15)
         
-        # Подбор размера шрифта для счетчика на основе основного шрифта календаря
-        main_font_size = self.font().pointSize()
-        if main_font_size > 0:
-             self._task_count_font.setPointSize(max(6, int(main_font_size * 0.9))) # Немного меньше основного
-        else:
-            self._task_count_font.setPointSize(7) # Значение по умолчанию
-        self._task_count_font.setBold(True) # Жирный шрифт для лучшей видимости
+        self.checkbox = QCheckBox()
+        self.checkbox.setChecked(bool(task_data['is_completed']))
+        self.checkbox.stateChanged.connect(self.on_status_change)
         
-        # Цвет для счетчика задач (по умолчанию синий)
-        self._task_count_color = QColor(Qt.GlobalColor.white)
-        # Цвет для счетчика на выделенной дате (по умолчанию желтый)
-        self._task_count_selected_color = QColor(Qt.GlobalColor.lightGray)
-
-
-    def set_task_counts_for_month(self, counts: dict):
-        """Устанавливает словарь с количеством задач для текущего месяца."""
-        self._task_counts_for_month = counts
-        self.updateCells()  # Запрос на перерисовку всех ячеек календаря
-
-    def paintCell(self, painter: QPainter, rect: QRect, date: QDate):
-        """Переопределенный метод для отрисовки ячейки календаря."""
-        # Сначала вызываем стандартный метод отрисовки ячейки
-        super().paintCell(painter, rect, date)
-
-        count = self._task_counts_for_month.get(date)
-
-        # Если для этой даты есть задачи (count > 0), рисуем их количество
-        if count and count > 0:
-            painter.save() # Сохраняем текущее состояние QPainter (шрифт, цвет и т.д.)
-            painter.setFont(self._task_count_font) # Устанавливаем шрифт для счетчика
-
-            # Выбираем цвет для счетчика в зависимости от того, выбрана ли дата
-            if self.selectedDate() == date:
-                painter.setPen(self._task_count_selected_color)
-            else:
-                painter.setPen(self._task_count_color)
-
-            count_str = str(count) # Преобразуем количество в строку
-            fm = QFontMetrics(self._task_count_font) # Для получения размеров текста
-            
-            # Рассчитываем позицию для счетчика (правый верхний угол ячейки)
-            padding_x = 3  # Отступ справа
-            padding_y = 2  # Отступ сверху
-            
-            text_width = fm.horizontalAdvance(count_str)
-            # text_height = fm.height() # Полная высота символов
-            ascent = fm.ascent() # Высота от базовой линии до верха
-
-            # Координаты для отрисовки текста
-            # x: правый край ячейки - ширина текста - отступ
-            # y: верхний край ячейки + высота до базовой линии + отступ
-            text_x = rect.right() - text_width - padding_x
-            text_y = rect.top() + ascent + padding_y
-            
-            painter.drawText(QPoint(text_x, text_y), count_str) # Рисуем текст
-            painter.restore() # Восстанавливаем состояние QPainter
-
-### КЛАСС: CalendarWidget - Управляет календарем и списком задач.
-class CalendarWidget(QWidget):
-    ### --- Метод: __init__ --- Инициализирует виджет календаря.
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.all_tasks = []
-        self.db_conn = None
-        self.current_calendar_qdate = QDate.currentDate()
-        self.russian_locale = QLocale(QLocale.Language.Russian, QLocale.Country.Russia)
-        self.init_db()
-        self._setup_ui() # Здесь будет создан CustomCalendarWidget
-        self._load_all_tasks_from_db()
-        self._initial_calendar_setup()
-        self.reminder_timer = QTimer(self)
-        self.reminder_timer.timeout.connect(self.check_reminders)
-        self.reminder_timer.start(15 * 1000)
-
-    ### --- Метод: _setup_ui --- Создает элементы интерфейса для вкладки "Календарь".
-    def _setup_ui(self):
-        self.main_layout = QVBoxLayout(self)
-        nav_layout = QHBoxLayout()
-        self.prev_month_button = QPushButton("<")
-        self.prev_month_button.setToolTip("Предыдущий месяц")
-        self.prev_month_button.clicked.connect(self._go_to_previous_month)
-        nav_layout.addWidget(self.prev_month_button)
-
-        self.month_year_combo_container = QWidget()
-        combo_box_layout = QHBoxLayout(self.month_year_combo_container)
-        combo_box_layout.setContentsMargins(5,0,5,0)
-        combo_box_layout.addStretch()
-
-        self.month_combo = QComboBox()
-        self.month_combo.setToolTip("Выберите месяц")
-        for m in range(1, 13):
-            month_name = self.russian_locale.monthName(m, QLocale.FormatType.LongFormat)
-            self.month_combo.addItem(month_name.capitalize(), m)
-        self.month_combo.currentIndexChanged.connect(self._combo_selection_changed)
-        combo_box_layout.addWidget(self.month_combo)
-
-        self.year_combo = QComboBox()
-        self.year_combo.setToolTip("Выберите год")
-        for year_val in range(2024, 2027 + 1):
-            self.year_combo.addItem(str(year_val), year_val)
-        self.year_combo.currentIndexChanged.connect(self._combo_selection_changed)
-        combo_box_layout.addWidget(self.year_combo)
-
-        combo_box_layout.addStretch()
-        nav_layout.addWidget(self.month_year_combo_container, 1)
-
-        self.next_month_button = QPushButton(">")
-        self.next_month_button.setToolTip("Следующий месяц")
-        self.next_month_button.clicked.connect(self._go_to_next_month)
-        nav_layout.addWidget(self.next_month_button)
-
-        self.today_button = QPushButton("Сегодня")
-        self.today_button.setToolTip("Перейти к текущему месяцу")
-        self.today_button.clicked.connect(self._go_to_today)
-        nav_layout.addWidget(self.today_button)
-
-        self.add_task_button_calendar = QPushButton("Добавить задачу")
-        self.add_task_button_calendar.clicked.connect(self._open_add_task_dialog_calendar)
-        nav_layout.addWidget(self.add_task_button_calendar)
-        self.main_layout.addLayout(nav_layout)
-
-        self.calendar_view = CustomCalendarWidget() # Используем наш кастомный календарь
-        self.calendar_view.setGridVisible(True)
-        self.calendar_view.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
-        self.calendar_view.clicked[QDate].connect(self._date_selected_on_calendar)
-        self.calendar_view.currentPageChanged.connect(self._calendar_page_has_changed)
-        navigation_bar = self.calendar_view.findChild(QWidget, "qt_calendar_navigationbar")
-        if navigation_bar:
-            navigation_bar.setVisible(False)
-        fmt_weekend = QTextCharFormat()
-        fmt_weekend.setForeground(QColor("red"))
-        self.calendar_view.setWeekdayTextFormat(Qt.DayOfWeek.Saturday, fmt_weekend)
-        self.calendar_view.setWeekdayTextFormat(Qt.DayOfWeek.Sunday, fmt_weekend)
-        self.main_layout.addWidget(self.calendar_view, 4)
-
-        self.daily_task_list_widget = QListWidget()
-        self.daily_task_list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.daily_task_list_widget.customContextMenuRequested.connect(self.show_daily_task_context_menu)
-        self.daily_task_list_widget.itemDoubleClicked.connect(self.edit_selected_daily_task)
-        self.main_layout.addWidget(self.daily_task_list_widget, 1)
-
-    ### --- Метод: _initial_calendar_setup --- Выполняет первоначальную настройку календаря.
-    def _initial_calendar_setup(self):
-        self.calendar_view.setCurrentPage(self.current_calendar_qdate.year(), self.current_calendar_qdate.month())
-        today = QDate.currentDate()
-        if self.current_calendar_qdate.year() == today.year() and self.current_calendar_qdate.month() == today.month():
-            self.calendar_view.setSelectedDate(today)
-        else:
-            self.calendar_view.setSelectedDate(QDate(self.current_calendar_qdate.year(), self.current_calendar_qdate.month(), 1))
-
-    ### --- Метод: _update_month_year_combos --- Синхронизирует выпадающие списки месяца/года.
-    def _update_month_year_combos(self):
-        self.month_combo.blockSignals(True)
-        self.year_combo.blockSignals(True)
-        month_idx = self.month_combo.findData(self.current_calendar_qdate.month())
-        if month_idx != -1: self.month_combo.setCurrentIndex(month_idx)
-        year_idx = self.year_combo.findData(self.current_calendar_qdate.year())
-        if year_idx != -1: self.year_combo.setCurrentIndex(year_idx)
-        self.month_combo.blockSignals(False)
-        self.year_combo.blockSignals(False)
-
-    ### --- Метод: _combo_selection_changed --- Обрабатывает изменение выбора в комбо-боксах месяца/года.
-    def _combo_selection_changed(self):
-        selected_month = self.month_combo.currentData()
-        selected_year = self.year_combo.currentData()
-        if selected_month is None or selected_year is None: return
-        if (self.current_calendar_qdate.month() == selected_month and
-            self.current_calendar_qdate.year() == selected_year):
-            return
-        self.current_calendar_qdate = QDate(selected_year, selected_month, 1)
-        self.calendar_view.setCurrentPage(selected_year, selected_month)
-
-    ### --- Метод: _go_to_previous_month --- Переход к предыдущему месяцу.
-    def _go_to_previous_month(self):
-        target_date = self.current_calendar_qdate.addMonths(-1)
-        if target_date.year() < 2024: target_date = QDate(2024, 1, 1)
-        self.current_calendar_qdate = target_date
-        self.calendar_view.setCurrentPage(self.current_calendar_qdate.year(), self.current_calendar_qdate.month())
-
-    ### --- Метод: _go_to_next_month --- Переход к следующему месяцу.
-    def _go_to_next_month(self):
-        target_date = self.current_calendar_qdate.addMonths(1)
-        if target_date.year() > 2027: target_date = QDate(2027, 12, 1)
-        self.current_calendar_qdate = target_date
-        self.calendar_view.setCurrentPage(self.current_calendar_qdate.year(), self.current_calendar_qdate.month())
-
-    ### --- Метод: _go_to_today --- Переход к текущему месяцу/дню.
-    def _go_to_today(self):
-        today = QDate.currentDate()
-        if today.year() < 2024:
-            self.current_calendar_qdate = QDate(2024, 1, 1)
-        elif today.year() > 2027:
-            self.current_calendar_qdate = QDate(2027, 12, 1)
-        else:
-            self.current_calendar_qdate = today
-        self.calendar_view.setCurrentPage(self.current_calendar_qdate.year(), self.current_calendar_qdate.month())
-        self.calendar_view.setSelectedDate(self.current_calendar_qdate)
-
-    ### --- Метод: _calendar_page_has_changed --- Обрабатывает смену страницы (месяца/года) календаря.
-    def _calendar_page_has_changed(self, year, month):
-        if not (self.current_calendar_qdate.year() == year and self.current_calendar_qdate.month() == month):
-             self.current_calendar_qdate = QDate(year, month, 1)
-        self._update_month_year_combos()
-        self._fetch_tasks_for_current_month_and_mark_calendar() # Здесь обновятся и счетчики
-        new_selected_date = self.calendar_view.selectedDate()
-        if not new_selected_date.isValid() or new_selected_date.month() != month or new_selected_date.year() != year:
-            new_selected_date = QDate(year, month, 1)
-            self.calendar_view.setSelectedDate(new_selected_date)
-        else:
-            self._update_daily_task_list(new_selected_date)
-
-    ### --- Метод: _date_selected_on_calendar --- Обрабатывает выбор даты в календаре.
-    def _date_selected_on_calendar(self, date: QDate):
-        self._update_daily_task_list(date)
-
-    ### --- Метод: _fetch_tasks_for_current_month_and_mark_calendar --- Загружает задачи и маркирует даты календаря (включая счетчики).
-    def _fetch_tasks_for_current_month_and_mark_calendar(self):
-        if not self.db_conn: return
-
-        year = self.current_calendar_qdate.year()
-        month = self.current_calendar_qdate.month()
-        current_page_first_day = QDate(year, month, 1)
-
-        # Сброс форматирования для дат текущего месяца
-        fmt_default = QTextCharFormat()
-        fmt_weekend_base = QTextCharFormat()
-        fmt_weekend_base.setForeground(QColor("red"))
-        for day_offset in range(current_page_first_day.daysInMonth()):
-            date_to_clear = current_page_first_day.addDays(day_offset)
-            day_of_week = date_to_clear.dayOfWeek()
-            if day_of_week == Qt.DayOfWeek.Saturday.value or day_of_week == Qt.DayOfWeek.Sunday.value:
-                self.calendar_view.setDateTextFormat(date_to_clear, fmt_weekend_base)
-            else:
-                self.calendar_view.setDateTextFormat(date_to_clear, fmt_default)
-
-        # Сбор количества задач и дат с задачами
-        tasks_counts_for_month = {} # {QDate: count}
-        task_dates_for_bolding = set()
-
-        for task in self.all_tasks: # self.all_tasks уже загружены и содержат все задачи
-            if task.reminder_datetime and task.reminder_datetime.isValid():
-                task_date = task.reminder_datetime.date()
-                if task_date.year() == year and task_date.month() == month:
-                    task_dates_for_bolding.add(task_date)
-                    tasks_counts_for_month[task_date] = tasks_counts_for_month.get(task_date, 0) + 1
+        # Текстовая часть (Название и мета-информация)
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(2)
+        title_label = QLabel(task_data['title'])
+        title_label.setObjectName("TaskTitle")
+        title_label.setWordWrap(True)
         
-        # Применение жирного шрифта к датам с задачами
-        for q_date in task_dates_for_bolding:
-            current_format = self.calendar_view.dateTextFormat(q_date)
-            current_format.setFontWeight(QFont.Weight.Bold)
-            self.calendar_view.setDateTextFormat(q_date, current_format)
+        meta_text = []
+        if task_data['tags']: meta_text.append(task_data['tags'])
+        if task_data['due_date']:
+            try: meta_text.append(datetime.date.fromisoformat(task_data['due_date']).strftime("%b %d"))
+            except (ValueError, TypeError): pass
             
-        # Передача словаря с количеством задач в CustomCalendarWidget
-        # Проверка необходима, так как self.calendar_view теперь CustomCalendarWidget
-        if hasattr(self.calendar_view, 'set_task_counts_for_month'):
-            self.calendar_view.set_task_counts_for_month(tasks_counts_for_month)
-        else: # Резервный вариант, если используется стандартный QCalendarWidget
-            self.calendar_view.updateCells()
+        meta_label = QLabel(" • ".join(meta_text))
+        meta_label.setObjectName("TaskMeta")
+        text_layout.addWidget(title_label)
+        if meta_text: text_layout.addWidget(meta_label)
+        
+        # Кнопка "Важное"
+        self.star_button = QPushButton()
+        self.star_button.setObjectName("StarButton")
+        self.star_button.setFixedSize(30, 30)
+        self.star_button.setCheckable(True)
+        self.star_button.setChecked(bool(task_data['is_important']))
+        self.star_button.setText("★" if self.star_button.isChecked() else "☆")
+        self.star_button.clicked.connect(self.on_importance_change)
+        
+        # Сборка layout
+        layout.addWidget(self.checkbox)
+        layout.addLayout(text_layout)
+        layout.addStretch()
+        layout.addWidget(self.star_button)
+        if task_data['details']: self.setToolTip(f"<b>Детали:</b><br>{task_data['details']}")
+        
+        self.update_visual_state(bool(task_data['is_completed']))
+
+    def update_visual_state(self, is_completed):
+        """Обновляет стиль виджета в зависимости от статуса (выполнено/не выполнено)."""
+        self.setProperty("completed", is_completed)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def on_status_change(self, state):
+        """Сигнал при изменении состояния чекбокса."""
+        is_completed = (state == Qt.CheckState.Checked.value)
+        self.update_visual_state(is_completed)
+        self.status_changed.emit(self.task_id, is_completed)
+
+    def on_importance_change(self):
+        """Сигнал при нажатии на кнопку 'важное'."""
+        is_important = self.star_button.isChecked()
+        self.star_button.setText("★" if is_important else "☆")
+        self.importance_changed.emit(self.task_id, is_important)
+
+    def mouseDoubleClickEvent(self, event):
+        """Сигнал для редактирования по двойному клику."""
+        self.edit_requested.emit(self.task_id)
+        super().mouseDoubleClickEvent(event)
 
 
-    ### --- Метод: _update_daily_task_list --- Обновляет список задач на выбранный день.
-    def _update_daily_task_list(self, selected_date: QDate):
-        self.daily_task_list_widget.clear()
-        tasks_on_day = [
-            task for task in self.all_tasks
-            if task.reminder_datetime and task.reminder_datetime.isValid() and \
-               task.reminder_datetime.date() == selected_date
-        ]
-        tasks_on_day.sort(key=lambda t: (
-            t.completed, t.priority,
-            t.reminder_datetime if t.reminder_datetime and t.reminder_datetime.isValid() else QDateTime()
-        ))
-        if not tasks_on_day:
-            item = QListWidgetItem(f"Задач на {selected_date.toString('dd.MM.yyyy')} нет.")
-            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-            font = item.font(); font.setItalic(True); item.setFont(font)
-            item.setForeground(Qt.GlobalColor.gray)
-            self.daily_task_list_widget.addItem(item)
-            return
-        for task in tasks_on_day:
-            text_parts = []
-            if task.reminder_datetime and task.reminder_datetime.isValid():
-                 text_parts.append(f"[{task.reminder_datetime.toString('HH:mm')}]")
-            text_parts.append(task.text)
-            if task.priority != 4:
-                 text_parts.append(f"[{PRIORITIES[task.priority]['name'].split(' ')[0]}]")
-            list_item = QListWidgetItem(" ".join(text_parts))
-            list_item.setData(Qt.ItemDataRole.UserRole, task.id)
-            font = list_item.font()
-            if task.completed:
-                font.setStrikeOut(True)
-                list_item.setForeground(Qt.GlobalColor.darkGray)
-            else:
-                font.setStrikeOut(False)
-                list_item.setForeground(PRIORITIES.get(task.priority, {}).get("color", Qt.GlobalColor.black))
-            list_item.setFont(font)
-            self.daily_task_list_widget.addItem(list_item)
-
-    ### --- Метод: init_db --- Инициализирует базу данных.
-    def init_db(self):
-        try:
-            db_dir = os.path.dirname(DATABASE_NAME)
-            if db_dir and not os.path.exists(db_dir):
-                os.makedirs(db_dir, exist_ok=True)
-            self.db_conn = sqlite3.connect(DATABASE_NAME)
-            cursor = self.db_conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS tasks (
-                    id TEXT PRIMARY KEY, text TEXT NOT NULL, priority INTEGER,
-                    reminder_datetime TEXT, completed INTEGER DEFAULT 0,
-                    reminder_shown INTEGER DEFAULT 0 )
-            ''')
-            self.db_conn.commit()
-        except sqlite3.Error as e:
-            QMessageBox.critical(self, "Ошибка Базы Данных", f"Не удалось инициализировать БД: {e}")
-            self.db_conn = None
-
-    ### --- Метод: _load_all_tasks_from_db --- Загружает все задачи из БД.
-    def _load_all_tasks_from_db(self):
-        if not self.db_conn: return
-        self.all_tasks.clear()
-        try:
-            cursor = self.db_conn.cursor()
-            cursor.execute("SELECT id, text, priority, reminder_datetime, completed, reminder_shown FROM tasks")
-            for row in cursor.fetchall():
-                id_str, text, priority, dt_str, completed, shown = row
-                reminder_dt = None
-                if dt_str:
-                    temp_dt = QDateTime.fromString(dt_str, Qt.DateFormat.ISODateWithMs)
-                    if not temp_dt.isValid(): temp_dt = QDateTime.fromString(dt_str, Qt.DateFormat.ISODate)
-                    if temp_dt.isValid(): reminder_dt = temp_dt
-                self.all_tasks.append(Task(text, priority, reminder_dt, bool(completed), id_str, bool(shown)))
-        except sqlite3.Error as e:
-            QMessageBox.warning(self, "Ошибка Базы Данных", f"Не удалось загрузить задачи: {e}")
-
-    ### --- Метод: _refresh_calendar_and_list --- Обновляет календарь и список задач.
-    def _refresh_calendar_and_list(self):
-        self._load_all_tasks_from_db()
-        self._fetch_tasks_for_current_month_and_mark_calendar() # Обновит и счетчики, и выделение
-        self._update_daily_task_list(self.calendar_view.selectedDate())
-
-    ### --- Метод: save_task_to_db --- Сохраняет задачу в БД.
-    def save_task_to_db(self, task: Task) -> bool:
-        if not self.db_conn: return False
-        dt_str = task.reminder_datetime.toString(Qt.DateFormat.ISODateWithMs) if task.reminder_datetime and task.reminder_datetime.isValid() else None
-        try:
-            cursor = self.db_conn.cursor()
-            cursor.execute("INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?)",
-                           (task.id, task.text, task.priority, dt_str, int(task.completed), int(task.reminder_shown)))
-            self.db_conn.commit()
-            return True
-        except sqlite3.Error as e:
-            QMessageBox.critical(self, "Ошибка БД", f"Сохранение задачи: {e}"); return False
-
-    ### --- Метод: update_task_in_db --- Обновляет задачу в БД.
-    def update_task_in_db(self, task: Task) -> bool:
-        if not self.db_conn: return False
-        dt_str = task.reminder_datetime.toString(Qt.DateFormat.ISODateWithMs) if task.reminder_datetime and task.reminder_datetime.isValid() else None
-        try:
-            cursor = self.db_conn.cursor()
-            cursor.execute("""UPDATE tasks SET text=?, priority=?, reminder_datetime=?,
-                              completed=?, reminder_shown=? WHERE id=?""",
-                           (task.text, task.priority, dt_str, int(task.completed), int(task.reminder_shown), task.id))
-            self.db_conn.commit()
-            return True
-        except sqlite3.Error as e:
-            QMessageBox.critical(self, "Ошибка БД", f"Обновление задачи: {e}"); return False
-
-    ### --- Метод: delete_task_from_db --- Удаляет задачу из БД.
-    def delete_task_from_db(self, task_id: str) -> bool:
-        if not self.db_conn: return False
-        try:
-            cursor = self.db_conn.cursor()
-            cursor.execute("DELETE FROM tasks WHERE id=?", (task_id,))
-            self.db_conn.commit()
-            return True
-        except sqlite3.Error as e:
-            QMessageBox.critical(self, "Ошибка БД", f"Удаление задачи: {e}"); return False
-
-    ### --- Метод: _open_add_task_dialog_calendar --- Открывает диалог добавления задачи через календарь.
-    def _open_add_task_dialog_calendar(self):
-        selected_date = self.calendar_view.selectedDate()
-        if not selected_date.isValid(): selected_date = QDate.currentDate()
-        dialog = EditTaskDialog(parent=self, default_date=selected_date)
-        if dialog.exec():
-            task_data = dialog.get_task_data()
-            if task_data:
-                text, priority, reminder_dt = task_data
-                new_task = Task(text, priority, reminder_dt)
-                if self.save_task_to_db(new_task):
-                    self._refresh_calendar_and_list()
-
-    ### --- Метод: edit_selected_daily_task --- Редактирует задачу по двойному клику в списке.
-    def edit_selected_daily_task(self, item: QListWidgetItem):
-        task_id = item.data(Qt.ItemDataRole.UserRole)
-        if task_id: self.edit_task_by_id(task_id)
-
-    ### --- Метод: edit_task_by_id --- Открывает диалог редактирования задачи по ID.
-    def edit_task_by_id(self, task_id: str):
-        task_to_edit = next((t for t in self.all_tasks if t.id == task_id), None)
-        if not task_to_edit: return
-        dialog = EditTaskDialog(task_to_edit, self)
-        if dialog.exec():
-            task_data = dialog.get_task_data()
-            if task_data:
-                text, priority, reminder_dt = task_data
-                if task_to_edit.reminder_datetime != reminder_dt:
-                    task_to_edit.reminder_shown = False
-                task_to_edit.text, task_to_edit.priority, task_to_edit.reminder_datetime = text, priority, reminder_dt
-                if self.update_task_in_db(task_to_edit):
-                    self._refresh_calendar_and_list()
-
-    ### --- Метод: show_daily_task_context_menu --- Отображает контекстное меню для задач в списке.
-    def show_daily_task_context_menu(self, position: QPoint):
-        selected_item = self.daily_task_list_widget.itemAt(position)
-        if not selected_item: return
-        task_id = selected_item.data(Qt.ItemDataRole.UserRole)
-        if not task_id: return
-        task = next((t for t in self.all_tasks if t.id == task_id), None)
-        if not task: return
-        menu = QMenu()
-        menu.addAction("Редактировать", lambda: self.edit_task_by_id(task_id))
-        toggle_text = "Снять отметку о выполнении" if task.completed else "Отметить как выполненную"
-        menu.addAction(toggle_text, lambda: self.toggle_task_completion(task_id))
-        if not task.completed and task.reminder_datetime and task.reminder_datetime.isValid() and task.reminder_shown:
-            menu.addAction("Сбросить показанное напоминание", lambda: self.reset_reminder_shown_status(task_id))
-        menu.addAction("Удалить", lambda: self.confirm_delete_task(task_id))
-        menu.exec(self.daily_task_list_widget.mapToGlobal(position))
-
-    ### --- Метод: reset_reminder_shown_status --- Сбрасывает флаг "напоминание показано".
-    def reset_reminder_shown_status(self, task_id: str):
-        task = next((t for t in self.all_tasks if t.id == task_id), None)
-        if task:
-            task.reminder_shown = False
-            if self.update_task_in_db(task):
-                QMessageBox.information(self, "Напоминание сброшено", f"Напоминание для задачи '{task.text[:30]}...' будет показано снова, если актуально.")
-                self._refresh_calendar_and_list()
-
-    ### --- Метод: toggle_task_completion --- Переключает статус выполнения задачи.
-    def toggle_task_completion(self, task_id: str):
-        task = next((t for t in self.all_tasks if t.id == task_id), None)
-        if task:
-            task.completed = not task.completed
-            if not task.completed and task.reminder_datetime and task.reminder_datetime.isValid() and \
-               task.reminder_datetime <= QDateTime.currentDateTime() and task.reminder_shown:
-                task.reminder_shown = False
-            if self.update_task_in_db(task):
-                self._refresh_calendar_and_list()
-
-    ### --- Метод: confirm_delete_task --- Запрашивает подтверждение удаления задачи.
-    def confirm_delete_task(self, task_id: str):
-        task = next((t for t in self.all_tasks if t.id == task_id), None)
-        if not task: return
-        if QMessageBox.question(self, "Удалить задачу", f"Удалить задачу:\n'{task.text}'?",
-                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                 QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
-            if self.delete_task_from_db(task_id):
-                self._refresh_calendar_and_list()
-
-    ### --- Метод: check_reminders --- Проверяет и отображает напоминания.
-    def check_reminders(self):
-        now = QDateTime.currentDateTime()
-        tasks_to_update_db_for = []
-        reminders_to_show_ui = []
-        for task in self.all_tasks:
-            if task.reminder_datetime and task.reminder_datetime.isValid() and \
-               not task.completed and not task.reminder_shown and task.reminder_datetime <= now:
-                reminders_to_show_ui.append(task)
-                task.reminder_shown = True
-                tasks_to_update_db_for.append(task)
-        for t in reminders_to_show_ui:
-             QMessageBox.information(self, "Напоминание!",
-                                    f"Пора выполнить задачу:\n\n{t.text}\n\n"
-                                    f"Приоритет: {PRIORITIES[t.priority]['name']}")
-        if tasks_to_update_db_for and self.db_conn:
-            try:
-                cursor = self.db_conn.cursor()
-                updates = [(int(t.reminder_shown), t.id) for t in tasks_to_update_db_for]
-                cursor.executemany("UPDATE tasks SET reminder_shown = ? WHERE id = ?", updates)
-                self.db_conn.commit()
-                if any(t.reminder_datetime.date() == self.calendar_view.selectedDate() for t in tasks_to_update_db_for):
-                    self._update_daily_task_list(self.calendar_view.selectedDate())
-            except sqlite3.Error as e:
-                QMessageBox.critical(self, "Ошибка БД", f"Обновление статуса напоминания: {e}")
-
-    ### --- Метод: close_db --- Закрывает соединение с БД.
-    def close_db(self):
-        if self.db_conn:
-            self.db_conn.close()
-            self.db_conn = None
-
-
-### КЛАСС: CombinedApp - Главное окно приложения.
-class CombinedApp(QMainWindow):
-    ### --- Метод: __init__ --- Инициализирует главное окно.
+# --- Главное окно приложения ---
+class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(COMBINED_APP_NAME)
-        self.setGeometry(100, 100, 1000, 750)
-        QLocale.setDefault(QLocale(QLocale.Language.Russian, QLocale.Country.Russia))
-        self._setup_toolbar()
-        self._setup_tabs()
-        self.update_window_title()
+        self.db = DatabaseManager()
+        self.current_filter = 'important'
+        self.current_filter_value = None
+        self.current_title = "Важное"
+        self.active_animations = []
+        
+        self.setWindowTitle("Zettelkasten")
+        self.setGeometry(100, 100, 1280, 800)
+        
+        # Загрузка и раскрашивание иконок
+        text_color = self.palette().color(QPalette.ColorRole.Text)
+        raw_icons = {
+            "important": load_icon("icons/important.svg"),
+            "personal": load_icon("icons/personal.svg"),
+            "completed": load_icon("icons/completed.svg"),
+            "tag": load_icon("icons/tag.svg"),
+        }
+        self.icons = {name: colorize_icon(icon, text_color) for name, icon in raw_icons.items()}
+        
+        # Инициализация UI
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        main_layout = QHBoxLayout(main_widget)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        self.init_ui(main_layout)
+        
+        # Первоначальное обновление данных
+        self.refresh_all_views(animated=True)
 
-    ### --- Метод: _setup_toolbar --- Создает панель инструментов.
-    def _setup_toolbar(self):
-        self.main_toolbar = QToolBar("Main Toolbar")
-        self.main_toolbar.setMovable(False)
-        self.main_toolbar.setIconSize(QSize(16,16))
-        self.addToolBar(Qt.ToolBarArea.BottomToolBarArea, self.main_toolbar) # MOVED TOOLBAR TO BOTTOM
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.main_toolbar.addWidget(spacer)
-        about_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation)
-        about_action = QAction(about_icon, "", self)
-        about_action.setToolTip("О программе")
-        about_action.triggered.connect(self.show_about_dialog)
-        self.main_toolbar.addAction(about_action)
+        # Таймер для проверки напоминаний каждые 30 секунд
+        self.reminder_timer = QTimer(self)
+        self.reminder_timer.timeout.connect(self.check_for_reminders)
+        self.reminder_timer.start(30000)
 
-    ### --- Метод: _setup_tabs --- Создает и заполняет виджет вкладок.
-    def _setup_tabs(self):
-        self.tab_widget = QTabWidget()
-        self.setCentralWidget(self.tab_widget)
-        self.note_widget_instance = NoteWidget(self)
-        self.calendar_widget_instance = CalendarWidget(self)
-        self.tab_widget.addTab(self.note_widget_instance, "Заметки")
-        self.tab_widget.addTab(self.calendar_widget_instance, "Календарь")
-        self.tab_widget.currentChanged.connect(self.update_window_title)
+    # --- Инициализация и настройка UI ---
+    
+    def init_ui(self, main_layout):
+        """Инициализирует основной интерфейс, разделенный на три панели."""
+        left_panel = self.create_left_panel()
+        center_panel = self.create_center_panel()
+        right_panel = self.create_right_panel()
+        main_layout.addWidget(left_panel)
+        main_layout.addWidget(center_panel, 1) # центральная панель растягивается
+        main_layout.addWidget(right_panel)
 
-    ### --- Метод: show_about_dialog --- Отображает диалог "О программе".
+    def create_left_panel(self):
+        """Создает левую панель с навигацией (поиск, избранное, теги)."""
+        left_panel = QWidget()
+        left_panel.setObjectName("LeftPanel")
+        left_panel.setFixedWidth(250)
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(10, 10, 10, 10)
+        left_layout.setSpacing(10)
+        
+        title_label = QLabel("Zettelkasten")
+        title_label.setObjectName("AppTitle")
+        
+        self.search_bar = QLineEdit(placeholderText="🔍 Поиск")
+        self.search_bar.setObjectName("SearchBar")
+        self.search_bar.textChanged.connect(self.on_search_text_changed)
+        
+        self.favorites_list = QListWidget()
+        self.favorites_list.setObjectName("NavList")
+        self.favorites_list.itemClicked.connect(self.on_nav_item_clicked)
+        
+        self.tags_list = QListWidget()
+        self.tags_list.setObjectName("NavList")
+        self.tags_list.itemClicked.connect(self.on_tag_item_clicked)
+        
+        self.report_button = QPushButton("Выгрузить отчет")
+        self.report_button.setObjectName("ReportButton")
+        self.report_button.clicked.connect(self.show_report_dialog)
+
+        left_layout.addWidget(title_label)
+        left_layout.addWidget(self.search_bar)
+        left_layout.addSpacing(10)
+        left_layout.addWidget(QLabel("Избранное"))
+        left_layout.addWidget(self.favorites_list)
+        left_layout.addSpacing(10)
+        left_layout.addWidget(QLabel("Ваши теги"))
+        left_layout.addWidget(self.tags_list, 1)
+        left_layout.addWidget(self.report_button)
+        return left_panel
+
+    def create_center_panel(self):
+        """Создает центральную панель для отображения списка задач."""
+        center_panel = QWidget()
+        center_panel.setObjectName("CenterPanel")
+        center_layout = QVBoxLayout(center_panel)
+        center_layout.setContentsMargins(20, 20, 20, 20)
+        
+        header_layout = QHBoxLayout()
+        self.center_title_label = QLabel(self.current_title)
+        self.center_title_label.setObjectName("CenterTitle")
+        new_task_button = QPushButton("+ Новая задача")
+        new_task_button.setObjectName("NewTaskButton")
+        new_task_button.clicked.connect(self.show_new_task_menu)
+        header_layout.addWidget(self.center_title_label)
+        header_layout.addStretch()
+        header_layout.addWidget(new_task_button)
+        
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setObjectName("ScrollArea")
+        tasks_container = QWidget()
+        self.tasks_layout = QVBoxLayout(tasks_container)
+        self.tasks_layout.setSpacing(5)
+        self.tasks_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        scroll_area.setWidget(tasks_container)
+        
+        center_layout.addLayout(header_layout)
+        center_layout.addWidget(scroll_area)
+        return center_panel
+
+    def create_right_panel(self):
+        """Создает правую панель с календарем и списком завершенных задач."""
+        right_panel = QWidget()
+        right_panel.setObjectName("RightPanel")
+        right_panel.setFixedWidth(300)
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(10, 15, 10, 15)
+        
+        profile_label = ClickableLabel("Справка")
+        profile_label.setFont(QFont("Inter", 12, QFont.Weight.Bold))
+        profile_label.clicked.connect(self.show_about_dialog)
+        
+        self.calendar = QCalendarWidget(verticalHeaderFormat=QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader, gridVisible=True)
+        self.calendar.setObjectName("CalendarWidget")
+        self.calendar.selectionChanged.connect(self.on_date_selected)
+        
+        completed_label = QLabel("Завершенные задачи")
+        completed_label.setFont(QFont("Inter", 12, QFont.Weight.Bold))
+        self.completed_list_widget = QListWidget()
+        self.completed_list_widget.setObjectName("CompletedList")
+        
+        right_layout.addWidget(profile_label, alignment=Qt.AlignmentFlag.AlignTop)
+        right_layout.addSpacing(20)
+        right_layout.addWidget(self.calendar)
+        right_layout.addSpacing(20)
+        right_layout.addWidget(completed_label)
+        right_layout.addWidget(self.completed_list_widget)
+        return right_panel
+
+    # --- Напоминания и Анимации ---
+
+    def check_for_reminders(self):
+        """Проверяет и отображает напоминания, срок которых наступил."""
+        now_iso = datetime.datetime.now().isoformat()
+        due_reminders = self.db.get_due_reminders(now_iso)
+
+        for reminder in due_reminders:
+            msg_box = QMessageBox(self, icon=QMessageBox.Icon.Information, windowTitle="Напоминание о задаче")
+            dt = QDateTime.fromString(reminder['reminder_datetime'], Qt.DateFormat.ISODate)
+            msg_box.setText(f"<b>{reminder['title']}</b>")
+            msg_box.setInformativeText(f"Время выполнить задачу! (Напоминание на {dt.toString('HH:mm')})")
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            msg_box.exec()
+            self.db.delete_reminder(reminder['reminder_id'])
+
+    def animate_show_item(self, widget, duration):
+        """Анимация плавного появления виджета (изменение высоты и прозрачности)."""
+        group = QParallelAnimationGroup(self)
+        opacity_anim = QPropertyAnimation(widget, b"windowOpacity")
+        opacity_anim.setDuration(duration)
+        opacity_anim.setStartValue(0.0)
+        opacity_anim.setEndValue(1.0)
+        size_anim = QPropertyAnimation(widget, b"maximumHeight")
+        size_anim.setDuration(duration)
+        size_anim.setStartValue(0)
+        size_anim.setEndValue(widget.sizeHint().height())
+        size_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        group.addAnimation(opacity_anim)
+        group.addAnimation(size_anim)
+        group.finished.connect(lambda: self.active_animations.remove(group) if group in self.active_animations else None)
+        self.active_animations.append(group)
+        group.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+
+    # --- Обновление данных в UI ---
+
+    def refresh_all_views(self, animated=False):
+        """Обновляет все списки и панели в приложении."""
+        self.refresh_left_panel()
+        self.refresh_task_list(animated)
+        self.refresh_completed_list()
+
+    def refresh_task_list(self, animated=False, tasks_list=None):
+        """Обновляет центральный список задач в соответствии с текущим фильтром."""
+        clear_layout(self.tasks_layout)
+        tasks = tasks_list if tasks_list is not None else self.db.get_tasks(filter_by=self.current_filter, value=self.current_filter_value)
+        for i, task_data in enumerate(tasks):
+            task_widget = TaskWidget(task_data)
+            task_widget.status_changed.connect(self.handle_task_status_change)
+            task_widget.importance_changed.connect(self.handle_task_importance_change)
+            task_widget.edit_requested.connect(self.show_edit_task_dialog)
+            self.tasks_layout.addWidget(task_widget)
+            if animated:
+                self.animate_show_item(task_widget, 250 + i * 25)
+
+    def refresh_left_panel(self):
+        """Обновляет списки 'Избранное' и 'Теги' в левой панели."""
+        # Обновление "Избранного"
+        self.favorites_list.clear()
+        self.favorites_list.addItem(QListWidgetItem(self.icons.get("important"), "Важное"))
+        self.favorites_list.addItem(QListWidgetItem(self.icons.get("personal"), "Личное"))
+        self.favorites_list.addItem(QListWidgetItem(self.icons.get("completed"), "Завершенные"))
+
+        # Обновление списка тегов со счетчиками
+        self.tags_list.clear()
+        for tag, count in sorted(self.db.get_tags_with_counts().items()):
+            item = QListWidgetItem(self.tags_list)
+            # Создаем кастомный виджет для строки тега
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(5, 3, 8, 3) 
+            row_layout.setSpacing(6)
+            icon_label = QLabel()
+            icon_label.setPixmap(self.icons.get("tag").pixmap(QSize(16, 16)))
+            count_label = QLabel(str(count))
+            count_label.setObjectName("TagCount")
+            count_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            row_layout.addWidget(icon_label)
+            row_layout.addWidget(QLabel(tag), 1)
+            row_layout.addWidget(count_label)
+            item.setData(Qt.ItemDataRole.UserRole, tag) # Сохраняем имя тега для обработчика
+            self.tags_list.setItemWidget(item, row_widget)
+            
+    def refresh_completed_list(self):
+        """Обновляет список последних завершенных задач в правой панели."""
+        self.completed_list_widget.clear()
+        for task in self.db.get_tasks(filter_by='completed')[:5]:
+            item = QListWidgetItem(f"✔ {task['title']}")
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable) # Делаем невыделяемым
+            self.completed_list_widget.addItem(item)
+
+    # --- Отображение диалоговых окон ---
+
     def show_about_dialog(self):
-        info = ABOUT_INFO
-        QMessageBox.about(self, f"О программе {info['program_name']}",
-                          f"<b>{info['program_name']}</b><br>"
-                          f"Версия: {info['version']}<br><br>"
-                          f"<b>Авторы:</b><br>{info['authors']}<br><br>"
-                          f"<b>Описание:</b><br>{info['description']}<br><br>"
-                          f"{info['copyright']}")
+        """Показывает диалог 'О приложении'."""
+        AboutDialog(self).exec()
 
-    ### --- Метод: update_window_title --- Обновляет заголовок окна.
-    def update_window_title(self):
-        current_tab_index = self.tab_widget.currentIndex()
-        title_parts = [COMBINED_APP_NAME]
-        if current_tab_index == 0:
-            if self.note_widget_instance.current_file_path:
-                file_name = QFileInfo(self.note_widget_instance.current_file_path).baseName()
-                unsaved_marker = "*" if self.note_widget_instance.unsaved_changes else ""
-                title_parts = [f"{file_name}{unsaved_marker}", APP_NAME_NOTES]
-            else:
-                title_parts = [APP_NAME_NOTES]
-        elif current_tab_index == 1:
-            title_parts = [APP_NAME_CALENDAR]
-        self.setWindowTitle(" - ".join(title_parts))
+    def show_new_task_menu(self):
+        """Показывает контекстное меню для кнопки 'Новая задача'."""
+        button = self.sender()
+        menu = QMenu(self)
+        menu.addAction("Добавить как важное", lambda: self.show_add_task_dialog(mark_as_important=True))
+        menu.addAction("Добавить в 'Личное'", lambda: self.show_add_task_dialog(add_tag='Личное'))
+        menu.exec(button.mapToGlobal(QPoint(0, button.height())))
 
-    ### --- Метод: closeEvent --- Обрабатывает событие закрытия приложения.
+    def show_add_task_dialog(self, mark_as_important=False, add_tag=None):
+        """Открывает диалог добавления задачи и обрабатывает результат."""
+        dialog = AddTaskDialog(self)
+        if mark_as_important: dialog.important_check.setChecked(True)
+        if add_tag: dialog.tags_edit.setText(add_tag)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            task_data = dialog.get_task_data()
+            if task_data['title']: # Добавляем задачу только если есть заголовок
+                self.db.add_task(**task_data)
+                self.refresh_all_views(animated=True)
+
+    def show_edit_task_dialog(self, task_id):
+        """Открывает диалог редактирования задачи и обрабатывает результат."""
+        task_data = self.db.get_task_by_id(task_id)
+        if not task_data: return
+        reminders = self.db.get_reminders_for_task(task_id)
+        dialog = EditTaskDialog(task_data, reminders, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            new_data = dialog.get_task_data()
+            if new_data['title']:
+                self.db.update_task(task_id, new_data)
+                self.db.replace_all_reminders_for_task(task_id, dialog.get_reminders_data())
+                self.refresh_all_views(animated=True)
+
+    # --- Обработчики событий от виджетов ---
+
+    def handle_task_status_change(self, task_id, is_completed):
+        """Обрабатывает изменение статуса задачи (выполнена/не выполнена)."""
+        self.db.update_task_status(task_id, is_completed)
+        # Удаляем виджет из списка активных задач
+        for i in range(self.tasks_layout.count()):
+            widget = self.tasks_layout.itemAt(i).widget()
+            if isinstance(widget, TaskWidget) and widget.task_id == task_id:
+                widget.deleteLater()
+                break
+        # Обновляем списки, где это изменение должно отразиться
+        self.refresh_completed_list()
+        self.refresh_left_panel()
+
+    def handle_task_importance_change(self, task_id, is_important):
+        """Обрабатывает изменение флага 'важное' у задачи."""
+        self.db.update_task_importance(task_id, is_important)
+        # Если мы находимся в фильтре "Важное", список нужно перерисовать
+        if self.current_filter == 'important':
+             self.refresh_task_list(animated=True)
+
+    # --- Обработчики навигации и поиска ---
+
+    def on_nav_item_clicked(self, item):
+        """Обрабатывает клик по элементам в списке 'Избранное'."""
+        self.search_bar.clear() # Очищаем поиск
+        filter_text = item.text()
+        self.current_title = filter_text
+        self.current_filter_value = None
+        if filter_text == "Важное": self.current_filter = 'important'
+        elif filter_text == "Завершенные": self.current_filter = 'completed'
+        elif filter_text == "Личное": self.current_filter, self.current_filter_value = 'tag', 'Личное'
+        self.center_title_label.setText(self.current_title)
+        self.refresh_task_list(animated=True)
+
+    def on_tag_item_clicked(self, item):
+        """Обрабатывает клик по тегу в списке тегов."""
+        self.search_bar.clear()
+        if tag_name := item.data(Qt.ItemDataRole.UserRole):
+            self.current_filter = 'tag'
+            self.current_filter_value = tag_name
+            self.current_title = f"Тег: {tag_name}"
+            self.center_title_label.setText(self.current_title)
+            self.refresh_task_list(animated=True)
+
+    def on_date_selected(self):
+        """Обрабатывает выбор даты в календаре."""
+        self.search_bar.clear()
+        selected_date_q = self.calendar.selectedDate()
+        self.current_filter = 'date'
+        self.current_filter_value = selected_date_q.toString("yyyy-MM-dd")
+        self.current_title = f"Задачи на {selected_date_q.toString('d MMMM yyyy г.')}"
+        self.center_title_label.setText(self.current_title)
+        self.refresh_task_list(animated=True)
+
+    def on_search_text_changed(self, text):
+        """Обрабатывает изменение текста в строке поиска."""
+        query = text.strip()
+        if query:
+            self.center_title_label.setText(f'Результаты поиска: "{query}"')
+            self.refresh_task_list(animated=True, tasks_list=self.db.search_tasks(query))
+        else: # Если поиск пуст, возвращаемся к последнему активному фильтру
+            self.center_title_label.setText(self.current_title)
+            self.refresh_task_list(animated=True)
+
+    # --- Создание и сохранение отчетов ---
+    
+    def show_report_dialog(self):
+        """Показывает диалог выбора дат и инициирует сохранение отчета."""
+        dialog = ReportDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            date_range = dialog.get_date_range()
+            start_iso, end_iso = date_range["start_date"], date_range["end_date"]
+            
+            report_tasks = self.db.get_tasks(filter_by='date_range', start_date=start_iso, end_date=end_iso)
+            if not report_tasks:
+                QMessageBox.information(self, "Нет данных", "Задачи не найдены за выбранный период.")
+                return
+
+            default_filename = f"Отчет по задачам {start_iso} - {end_iso}"
+            filters = "Excel Files (*.xlsx);;Text Files (*.txt)"
+            filePath, selected_filter = QFileDialog.getSaveFileName(self, "Сохранить отчет", default_filename, filters)
+
+            if filePath:
+                if 'Excel' in selected_filter:
+                    self.save_report_as_excel(report_tasks, filePath, start_iso, end_iso)
+                else:
+                    self.save_report_as_txt(report_tasks, filePath, start_iso, end_iso)
+
+    def save_report_as_txt(self, tasks, file_path, start_date, end_date):
+        """Формирует и сохраняет отчет в формате .txt."""
+        start_pretty = QDate.fromString(start_date, 'yyyy-MM-dd').toString('dd.MM.yyyy')
+        end_pretty = QDate.fromString(end_date, 'yyyy-MM-dd').toString('dd.MM.yyyy')
+        report_text = f"Отчет по задачам с {start_pretty} по {end_pretty}:\n{'=' * 40}\n\n"
+        
+        for task in tasks:
+            status = "✔️ Выполнено" if task['is_completed'] else "❌ Не выполнено"
+            due_date = f"Срок: {QDate.fromString(task['due_date'], 'yyyy-MM-dd').toString('dd.MM.yyyy')}" if task['due_date'] else "Срок не указан"
+            report_text += f"Задача: {task['title']}\n"
+            report_text += f"Статус: {status} | {due_date}\n"
+            if task['details']: report_text += f"  Детали: {task['details']}\n"
+            if task['tags']: report_text += f"  Теги: {task['tags']}\n"
+            report_text += f"{'-' * 40}\n"
+        
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f: f.write(report_text)
+            QMessageBox.information(self, "Успех", f"Отчет успешно сохранен в файл:\n{file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить файл отчета.\nОшибка: {e}")
+
+    def save_report_as_excel(self, tasks, file_path, start_date, end_date):
+        """Формирует и сохраняет отчет в формате .xlsx."""
+        if not OPENPYXL_AVAILABLE:
+            QMessageBox.critical(self, "Ошибка", "Для экспорта в Excel необходимо установить библиотеку openpyxl.\nВыполните: pip install openpyxl")
+            return
+
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        start_pretty = QDate.fromString(start_date, 'yyyy-MM-dd').toString('dd.MM.yyyy')
+        end_pretty = QDate.fromString(end_date, 'yyyy-MM-dd').toString('dd.MM.yyyy')
+        sheet.title = f"Отчет {start_pretty}-{end_pretty}"
+        
+        headers = ["Задача", "Статус", "Срок выполнения", "Детали", "Теги"]
+        sheet.append(headers)
+        header_font = Font(bold=True)
+        for col_num, header_title in enumerate(headers, 1):
+            cell = sheet.cell(row=1, column=col_num)
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+
+        for task in tasks:
+            status = "Выполнено" if task['is_completed'] else "Не выполнено"
+            due_date = QDate.fromString(task['due_date'], 'yyyy-MM-dd').toString('dd.MM.yyyy') if task.get('due_date') else ""
+            sheet.append([task.get('title', ''), status, due_date, task.get('details', ''), task.get('tags', '')])
+
+        for col_num in range(1, len(headers) + 1):
+            column_letter = get_column_letter(col_num)
+            max_length = max(len(str(cell.value)) for cell in sheet[column_letter] if cell.value)
+            sheet.column_dimensions[column_letter].width = min((max_length + 2) * 1.2, 70)
+
+        try:
+            workbook.save(file_path)
+            QMessageBox.information(self, "Успех", f"Отчет успешно сохранен в файл:\n{file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить файл отчета.\nОшибка: {e}")
+
+    # --- Системные события ---
+    
     def closeEvent(self, event):
-        if self.note_widget_instance.unsaved_changes:
-            reply = QMessageBox.question(self, 'Несохраненные изменения',
-                                         "В текущей заметке есть несохраненные изменения. Сохранить перед выходом?",
-                                         QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
-                                         QMessageBox.StandardButton.Cancel)
-            if reply == QMessageBox.StandardButton.Save:
-                self.note_widget_instance.save_note()
-                if self.note_widget_instance.unsaved_changes:
-                    event.ignore(); return
-            elif reply == QMessageBox.StandardButton.Cancel:
-                event.ignore(); return
-        self.calendar_widget_instance.close_db()
+        """Обрабатывает закрытие окна, корректно завершая работу с БД."""
+        self.db.close()
         super().closeEvent(event)
 
-
-### --- Запуск основного приложения --- ###
-if __name__ == '__main__':
+# --- Точка входа в приложение ---
+if __name__ == "__main__":
     app = QApplication(sys.argv)
-    dark_stylesheet = """
-    QWidget {
-        background-color: #202020; 
-        color: #C0C0C0; 
-        selection-background-color: #4A90D9; 
-        selection-color: #FFFFFF; 
-    }
-    QMainWindow { background-color: #202020; }
-    QTabWidget::pane { border: 1px solid #3A3A3A; }
-    QTabBar::tab {
-        background-color: #282828; color: #A0A0A0; 
-        border: 1px solid #3A3A3A; border-bottom: none; 
-        padding: 8px 15px; margin-right: 2px; 
-        border-top-left-radius: 4px; border-top-right-radius: 4px; 
-    }
-    QTabBar::tab:selected { background-color: #202020; color: #E0E0E0; }
-    QTabBar::tab:hover { background-color: #333333; }
-    QPushButton {
-        background-color: #333333; border: 1px solid #555555;
-        border-radius: 4px; padding: 5px 15px; color: #E0E0E0;
-    }
-    QPushButton:hover { background-color: #444444; border-color: #666666; }
-    QPushButton:pressed { background-color: #222222; border-color: #444444; }
-    QPushButton:disabled { background-color: #282828; border-color: #383838; color: #808080; }
-    QTextEdit, QLineEdit {
-        background-color: #1A1A1A; color: #D4D4D4;
-        border: 1px solid #3A3A3A; padding: 5px;
-    }
-    QTextEdit::placeholder, QLineEdit::placeholder { color: #707070; }
-    QTreeView {
-        background-color: #252525; color: #C0C0C0;
-        border: 1px solid #3A3A3A; alternate-background-color: #2A2A2A; 
-        show-decoration-selected: 1; 
-    }
-    QTreeView::item { padding: 3px; color: #C0C0C0; }
-    QTreeView::item:hover { background-color: #3A3A3A; }
-    QTreeView::item:selected { background-color: #4A90D9; color: #FFFFFF; }
-    QListWidget {
-        background-color: #252525; color: #C0C0C0;
-        border: 1px solid #3A3A3A; alternate-background-color: #2A2A2A;
-    }
-    QListWidget::item { padding: 4px; }
-    QListWidget::item:hover { background-color: #3A3A3A; }
-    QListWidget::item:selected { background-color: #4A90D9; color: #FFFFFF; }
-    QSplitter::handle { background-color: #333333; width: 2px; }
-    QSplitter::handle:hover { background-color: #4A90D9; }
-    QMenu {
-        background-color: #2F2F2F; border: 1px solid #454545; color: #E0E0E0;
-    }
-    QMenu::item { padding: 5px 20px 5px 20px; }
-    QMenu::item:selected { background-color: #4A90D9; color: #FFFFFF; }
-    QMenu::separator { height: 1px; background-color: #454545; margin: 5px 10px; }
-    QDialog, QInputDialog, QMessageBox { background-color: #202020; color: #C0C0C0; }
-    QDialog QLabel, QInputDialog QLabel, QMessageBox QLabel { color: #C0C0C0; }
-    QComboBox {
-        background-color: #1A1A1A; color: #D4D4D4;
-        border: 1px solid #3A3A3A; padding: 3px 5px;
-        selection-background-color: #4A90D9; min-height: 20px;
-    }
-    QComboBox::drop-down { border: none; background-color: #333333; }
-    QComboBox QAbstractItemView {
-        background-color: #1A1A1A; border: 1px solid #3A3A3A;
-        selection-background-color: #4A90D9; color: #D4D4D4;
-    }
-    QDateTimeEdit {
-        background-color: #1A1A1A; color: #D4D4D4;
-        border: 1px solid #3A3A3A; padding: 3px;
-    }
-    QDateTimeEdit::up-button, QDateTimeEdit::down-button { width: 16px; }
-    QCheckBox::indicator { width: 13px; height: 13px; }
-    QToolBar {
-        background-color: #202020; 
-        border-top: 1px solid #3A3A3A; /* CHANGED border-bottom to border-top */
-        padding: 2px; spacing: 3px; 
-    }
-    QToolBar QToolButton {
-        background-color: transparent; color: #E0E0E0;
-        border: none; padding: 4px; margin: 1px; border-radius: 3px;
-    }
-    QToolBar QToolButton:hover { background-color: #383838; }
-    QToolBar QToolButton:pressed { background-color: #4A90D9; color: #FFFFFF; }
-
-    QCalendarWidget QWidget#qt_calendar_calendarview { 
-        alternate-background-color: #2A2A2A; 
-    }
-    QCalendarWidget QAbstractItemView:enabled { 
-        color: #C0C0C0; 
-        selection-background-color: #4A90D9; 
-        selection-color: #FFFFFF; 
-    }
-    QCalendarWidget QAbstractItemView:disabled { 
-        color: #606060;
-    }
-    QCalendarWidget QTableView QHeaderView::section {
-        background-color: #252525; 
-        color: #A0A0A0;            
-        padding: 5px 0; border: none; font-weight: normal; 
-    }
-    """
-    app.setStyleSheet(dark_stylesheet)
-
-    from pathlib import Path
-    script_dir = Path(__file__).resolve().parent
-    app_icon_path = script_dir / "icons" / "app_icon.png"
-    if app_icon_path.exists():
-        app.setWindowIcon(QIcon(str(app_icon_path)))
-    else:
-        print(f"Внимание: Иконка приложения не найдена по пути {app_icon_path}")
-
-    app.setStyle("Fusion")
-
-    main_win = CombinedApp()
-    main_win.show()
+    QToolTip.setFont(QFont("Inter", 10))
+    if os.path.exists("icons/icons.png"):
+        app.setWindowIcon(QIcon("icons/icons.png"))
+    
+    try:
+        with open("style.qss", "r", encoding="utf-8") as f:
+            app.setStyleSheet(f.read())
+    except FileNotFoundError:
+        print("Внимание: Файл style.qss не найден.")
+    
+    window = MainWindow()
+    window.show()
     sys.exit(app.exec())
