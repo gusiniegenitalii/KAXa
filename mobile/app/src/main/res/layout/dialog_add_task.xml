@@ -1,0 +1,24 @@
+<!-- res/layout/dialog_add_task.xml -->
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <EditText
+        android:id="@+id/editTextTaskTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Введите название задачи"
+        android:inputType="textCapSentences"
+        android:autofillHints="name" />
+
+    <CheckBox
+        android:id="@+id/checkboxImportant"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="Важная задача" />
+
+</LinearLayout>
